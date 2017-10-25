@@ -14,7 +14,7 @@ import datetime
 import time
 import asyncio
 import random
-
+import dateutil.parser
 
 # Init Discord client
 if len(sys.argv) < 1:
@@ -53,14 +53,15 @@ scrutinType = {
 		]
 	},
 	"election": {
-		"duration": 60,
+		"duration": 1440,
 		"instructions": False,
 		"choices": [
-			{ "emoji": "😡", "text": "Pas d'accord" },
-			{ "emoji": "😒", "text": "Plutôt pas d'accord" },
-			{ "emoji": "😶", "text": "Neutre" },
-			{ "emoji": "😊", "text": "Plutôt d'accord" },
-			{ "emoji": "😍", "text": "D'accord" }
+			{ "emoji": "🇷", "text": "À rejeter" },
+			{ "emoji": "🇮", "text": "Insuffisant" },
+			{ "emoji": "🇵", "text": "Passable" },
+			{ "emoji": "🇦", "text": "Assez bien" },
+			{ "emoji": "🇧", "text": "Bien" },
+			{ "emoji": "🇹", "text": "Très bien" }
 		]
 	},
 	"livevote": {
@@ -73,9 +74,11 @@ scrutinType = {
 		]
 	}
 }
-scrutinVoteInfo = "Vous pouvez voter en cliquant sur une « réaction ». Vous recevrez alors une confirmation de vote via message privé. Vous pouvez changer votre vote à tout moment."
-
 emojiWithTone = ["👎", "🤷", "👍"]
+ongoingVotes = {}
+topics = {}
+
+scrutinVoteInfo = "Vous pouvez voter en cliquant sur une « réaction ». Vous recevrez alors une confirmation de vote via message privé. Vous pouvez changer votre vote à tout moment."
 
 def checkEmoji(reaction, emoji):
 	e = str(reaction.emoji)
@@ -147,14 +150,44 @@ class Scrutin:
 			dateEnd = self.dateStart + datetime.timedelta(minutes=self.data.get("duration", -1))
 			return t > dateEnd
 
-ongoingVotes = {}
+class Topic:
+	def __init__(self, message):
+		self.message = message
+		self.counter = 0
+		self.dateLast = datetime.datetime.now()
+	
+	async def sendMessage(self, chan):
+		text = ":loudspeaker: **Rappel :** "+self.message
+		await client.send_message(chan, text)
+		
+		self.counter = 0
+		self.dateLast = datetime.datetime.now()
 
-
+try:
+	with open('backup.json', 'r') as infile:
+		data = json.load(infile)
+		
+		for topic in data.get("topics", []):
+			key = (topic.get("serverId", 0), topic.get("channelId", 0))
+			topics[key] = Topic(scrutin.get("message"))
+			topics[key].counter = scrutin.get("counter", 0)
+			topics[key].dateLast = dateutil.parser.parse(topic.get("dateLast", datetime.time().isoformat()))
+		
+		for scrutin in data.get("scrutins", []):
+			print("Scrutin found in backup")
+			key = (scrutin.get("serverId", 0), scrutin.get("channelId", 0), scrutin.get("messageId", 0))
+			dateStart = dateutil.parser.parse(scrutin.get("dateStart", datetime.time().isoformat()))
+			ongoingVotes[key] = Scrutin(scrutin.get("question"), scrutin.get("data"), scrutin.get("tone"), dateStart)
+			ongoingVotes[key].votes = scrutin.get("votes", {})
+except:
+	print("Can't load backup")
+	print(traceback.format_exc())
+	pass
 
 @client.event
 async def on_ready():
 	print("* Bot "+client.user.name+" logged successfully")
-
+	
 	prevTime = time.time()
 	while True:
 		currTime = time.time()
@@ -165,6 +198,17 @@ async def on_ready():
 		
 		with open('backup.json', 'w') as outfile:
 			data = {}
+			
+			data["scrutins"] = []
+			for t,topic in topics.items():
+				data["topics"].append({
+					"message": topic.message,
+					"counter": topic.counter,
+					"dateLast": topic.dateLast,
+					"serverId": s[0],
+					"channelId": s[1]
+				})
+			
 			data["scrutins"] = []
 			for s,scrutin in ongoingVotes.items():
 				data["scrutins"].append({
@@ -179,8 +223,24 @@ async def on_ready():
 				})
 		
 			json.dump(data, outfile)
-			
+		
+		for k,t in topics.items():
+			dateLast = self.dateLast + datetime.timedelta(minutes=self.data.get("duration", -1))
+			if t.get("counter", 0) > 10:
+				
+				serv = client.get_server(k[0])
+				if not serv:
+					break
+				chan = serv.get_channel(k[1])
+				if not chan:
+					break
+				
+				await client.send_message(chan, ":loudspeaker: **Sujet de la discussion : **"+t.get("message", ""))
+				
+				t["counter"] = 0
+		
 		toDelete = set()
+			
 		
 		for s,scrutin in ongoingVotes.items():
 			if ongoingVotes[s].checkTime(datetime.datetime.now() + datetime.timedelta(minutes=1)):
@@ -228,6 +288,11 @@ async def on_message(message):
 	try:
 		if not message.server:
 			return
+		
+		topicKey = (message.server.id, message.channel.id)
+		if topicKey in topics:
+			topics[topicKey]["counter"] = topics[topicKey].get("counter", 0) + 1
+		
 		if message.author.bot:
 			return
 		if message.content.find(client.user.mention+" ") != 0:
@@ -242,6 +307,8 @@ async def on_message(message):
 		
 		if cmd == "help":
 			text = "**Commandes:**\n\n"
+			text = text + "``@"+client.user.name+"#"+client.user.discriminator+" topic <texte>`` : change le sujet de la discussion.\n"
+			text = text + "``@"+client.user.name+"#"+client.user.discriminator+" topic`` : supprime le sujet de la discussion.\n"
 			text = text + "``@"+client.user.name+"#"+client.user.discriminator+" vote <texte>`` : lancer un scrutin « pour ou contre » d'une durée de un jour. Remplacez ``<texte>`` par la question à vote.\n"
 			text = text + "``@"+client.user.name+"#"+client.user.discriminator+" hvote <texte>`` : lancer un scrutin « pour ou contre » d'une durée de une heure. Remplacez ``<texte>`` par la question à vote.\n"
 			text = text + "``@"+client.user.name+"#"+client.user.discriminator+" weekvote <texte>`` : lancer un scrutin « pour ou contre » d'une durée de une semaine. Remplacez ``<texte>`` par la question à vote.\n"
@@ -249,6 +316,25 @@ async def on_message(message):
 			text = text + "``@"+client.user.name+"#"+client.user.discriminator+" election <texte>`` : lancer un scrutin de jugement d'une durée de un jour. Remplacez ``<texte>`` par la question à vote.\n"
 			text = text + "``@"+client.user.name+"#"+client.user.discriminator+" livevote <texte>`` : lancer un scrutin live qui affiche les résultats en directe. Remplacez ``<texte>`` par la question à vote.\n"
 			await client.send_message(message.channel, text)
+			return
+		
+		elif cmd == "topic":
+			topicMsg = " ".join(msgKeywords[1:])
+			
+			
+			if len(topicMsg) == 0:
+				if topicKey in topics:
+					del(topics[topicKey])
+					await client.send_message(message.channel, ":loudspeaker: Sujet de la discussion supprimé.")
+			else:
+				topics[topicKey] = {
+					"message": topicMsg,
+					"counter": 0
+				}
+				await client.send_message(message.channel, ":loudspeaker: **Sujet de la discussion : **"+topicMsg)
+			
+			await client.delete_message(message)
+			
 			return
 		
 		elif cmd == "electiondesc":
