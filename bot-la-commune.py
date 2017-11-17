@@ -1,0 +1,602 @@
+#!/usr/bin/python3
+
+#Command line parameter:
+#1: Discord TOKEN
+
+import discord
+import sys
+import json
+import traceback
+import io
+import re
+import math
+import datetime
+import time
+import asyncio
+import random
+import dateutil.parser
+
+# Init Discord client
+if len(sys.argv) < 1:
+	print("Usage: "+sys.argv[0]+" <DISCORD_TOKEN>")
+	exit(0)
+
+discord_token = sys.argv[1]
+client = discord.Client()
+
+scrutinType = {
+	"default": {
+		"duration": 1440,
+		"instructions": True,
+		"live": False,
+		"choices": [
+			{ "emoji": "👎", "text": "Pas d'accord" },
+			{ "emoji": "🤷", "text": "Neutre" },
+			{ "emoji": "👍", "text": "D'accord" }
+		]
+	},
+	"prop12": {
+		"duration": 1440,
+		"instructions": True,
+		"live": False,  
+
+		"choices": [
+			{ "emoji": "1⃣", "text": "La proposition 1 me satisfait le plus" },
+			{ "emoji": "2⃣", "text": "La proposition 2 me satisfait le plus" },
+			{ "emoji": "🤷", "text": "Neutre" }
+		]
+	},
+	"prop123": {
+		"duration": 1440,
+		"instructions": True,
+		"live": False,
+		"choices": [
+			{ "emoji": "1⃣", "text": "La proposition 1 me satisfait le plus" },
+			{ "emoji": "2⃣", "text": "La proposition 2 me satisfait le plus" },
+			{ "emoji": "3⃣", "text": "La proposition 3 me satisfait le plus" },
+			{ "emoji": "🤷", "text": "Neutre" }
+		]
+	},
+	"judge": {
+		"duration": 1440,
+		"instructions": True,
+		"live": False,
+		"choices": [
+			{ "emoji": "🇷", "text": "À rejeter" },
+			{ "emoji": "🇮", "text": "Insuffisant" },
+			{ "emoji": "🇵", "text": "Passable" },
+			{ "emoji": "🇦", "text": "Assez bien" },
+			{ "emoji": "🇧", "text": "Bien" },
+			{ "emoji": "🇹", "text": "Très bien" }
+		]
+	}
+}
+emojiWithTone = ["👎", "🤷", "👍"]
+ongoingVotes = {}
+topics = {}
+lastBan = {}
+
+scrutinVoteInfo = "Vous pouvez voter en cliquant sur une « réaction ». Vous recevrez alors une confirmation de vote via message privé. Vous pouvez changer votre vote à tout moment."
+
+def checkEmoji(reaction, emoji):
+	e = str(reaction.emoji)
+	return e.startswith(emoji)
+
+def applyTone(emoji, tone):
+	if emoji in emojiWithTone:
+		return emoji+tone
+	else:
+		return emoji
+
+class Scrutin:
+	def __init__(self, question, data, tone, dateStart):
+		self.question = question
+		self.dateStart = dateStart
+		self.data = data
+		self.votes = {}
+		self.tone = tone
+	
+	def getMessage(self):
+		counter = len(self.votes)
+		
+		voteCounter = {}
+		for uid,v in self.votes.items():
+			if v in voteCounter:
+				voteCounter[v] = voteCounter[v] + 1
+			else:
+				voteCounter[v] = 1
+		
+		message = ""
+		if self.data.get("instructions", True):
+			dateEnd = self.dateStart + datetime.timedelta(minutes=self.data.get("duration", 0))
+			message = message + "**Scrutin ouvert** jusqu'au "+dateEnd.strftime("%d/%m/%y à %H:%M")+"\n"
+			
+			message = message + scrutinVoteInfo+"\n\n"
+		
+		if self.question:
+			message = message + self.question+"\n"
+		
+		if self.data.get("instructions", True):
+			message = message + "\n"
+			for c in self.data.get("choices", []):
+				if self.data.get("live", False):
+					message = message + applyTone(c["emoji"], self.tone)+" : "+c["text"]+" ("+str(voteCounter.get(c["emoji"], 0))+")\n\n"
+				else:
+					message = message + applyTone(c["emoji"], self.tone)+" : "+c["text"]+"\n\n"
+		
+		message = message + "Participation : " + str(counter)
+		if counter > 1:
+			message = message + " personnes."
+		else:
+			message = message + " personne."
+		
+		return message
+	
+	def setVote(self, userId, emoji):
+		self.votes[userId] = emoji
+	
+	def getVote(self, userId):
+		return self.votes.get(userId, None)
+	
+	def checkTime(self, t):
+		if self.data.get("duration", -1) < 0:
+			return False
+		else:
+			dateEnd = self.dateStart + datetime.timedelta(minutes=self.data.get("duration", -1))
+			return t > dateEnd
+
+class Topic:
+	def __init__(self, message):
+		self.message = message
+		self.counter = 0
+		self.dateLast = datetime.datetime.now()
+	
+	async def sendMessage(self, chan):
+		text = ":loudspeaker: "+self.message
+		await client.send_message(chan, text)
+		
+		self.counter = 0
+		self.dateLast = datetime.datetime.now()
+	
+	def check(self):
+		if self.counter < 30:
+			return False
+		
+		dateEnd = self.dateLast + datetime.timedelta(minutes=5)
+		dateNow = datetime.datetime.now()
+		if dateNow < dateEnd:
+			return False
+		
+		return True
+
+try:
+	with open('backup.json', 'r') as infile:
+		data = json.load(infile)
+		
+		for topic in data.get("topics", []):
+			key = (topic.get("serverId", 0), topic.get("channelId", 0))
+			topics[key] = Topic(topic.get("message"))
+			topics[key].counter = topic.get("counter", 0)
+			topics[key].dateLast = dateutil.parser.parse(topic.get("dateLast", datetime.datetime.isoformat()))
+		
+		for scrutin in data.get("scrutins", []):
+			print("Scrutin found in backup")
+			key = (scrutin.get("serverId", 0), scrutin.get("channelId", 0), scrutin.get("messageId", 0))
+			dateStart = dateutil.parser.parse(scrutin.get("dateStart", datetime.datetime.isoformat()))
+			ongoingVotes[key] = Scrutin(scrutin.get("question"), scrutin.get("data"), scrutin.get("tone"), dateStart)
+			ongoingVotes[key].votes = scrutin.get("votes", {})
+except:
+	print("Can't load backup")
+	print(traceback.format_exc())
+	pass
+
+"""
+0 : Nouveaux-lles
+1 : Invité-e-s
+2 : Admis-e-s
+3 : Non-mixte
+4 : Modération
+5 : Technicien-ne-s
+6 : Propriétaire
+"""
+def getMemberLevel(member):
+	level = 0
+	
+	#Seach in NM
+	nm = False
+	for c in member.server.channels:
+		if c.name == "nm_feministe" and c.permissions_for(member).read_messages:
+			nm = True
+		if c.name == "nm_lgbti" and c.permissions_for(member).read_messages:
+			nm = True
+		if c.name == "nm_racise-e-s" and c.permissions_for(member).read_messages:
+			nm = True
+		if c.name == "nm_neuroatypique" and c.permissions_for(member).read_messages:
+			nm = True
+	
+	for r in member.roles:
+		if r.name == "Invité-e-s":
+			level = max(level, 1)
+		if r.name == "Admis-e-s":
+			if nm:
+				level = max(level, 3)
+			else:
+				level = max(level, 2)
+		if r.name == "Modération":
+			level = max(level, 4)
+		if r.name == "Technicien-ne-s":
+			level = max(level, 5)
+		if r.name == "Propriétaire":
+			level = max(level, 6)
+	return level
+
+@client.event
+async def on_ready():
+	print("* Bot "+client.user.name+" logged successfully")
+	
+	prevTime = time.time()
+	while True:
+		currTime = time.time()
+		sleepDuration = 20 - (currTime - prevTime)
+		prevTime = currTime
+		if sleepDuration > 0:
+			await asyncio.sleep(sleepDuration)
+		
+		with open('backup.json', 'w') as outfile:
+			data = {}
+			
+			data["topics"] = []
+			for t,topic in topics.items():
+				data["topics"].append({
+					"message": topic.message,
+					"counter": topic.counter,
+					"dateLast": topic.dateLast.isoformat(),
+					"serverId": t[0],
+					"channelId": t[1]
+				})
+			
+			data["scrutins"] = []
+			for s,scrutin in ongoingVotes.items():
+				data["scrutins"].append({
+					"question": scrutin.question,
+					"data": scrutin.data,
+					"votes": scrutin.votes,
+					"dateStart": scrutin.dateStart.isoformat(),
+					"tone": scrutin.tone,
+					"serverId": s[0],
+					"channelId": s[1],
+					"messageId": s[2]
+				})
+		
+			json.dump(data, outfile)
+		
+		for k,t in topics.items():
+			if t.check():
+				serv = client.get_server(k[0])
+				if not serv:
+					break
+				chan = serv.get_channel(k[1])
+				if not chan:
+					break
+				
+				await t.sendMessage(chan)
+		
+		toDelete = set()
+		
+		for s,scrutin in ongoingVotes.items():
+			try:
+				serv = client.get_server(s[0])
+				if not serv:
+					continue
+				chan = serv.get_channel(s[1])
+				if not chan:
+					continue
+			
+				msg = await client.get_message(chan, s[2])
+				
+				if ongoingVotes[s].checkTime(datetime.datetime.now() + datetime.timedelta(minutes=1)):
+					toDelete.add(s)
+					
+					voteCounter = {}
+					for uid,v in ongoingVotes[s].votes.items():
+						if v in voteCounter:
+							voteCounter[v] = voteCounter[v] + 1
+						else:
+							voteCounter[v] = 1
+					
+					text = "**Scrutin fermé.**\n\n"
+					if ongoingVotes[s].question:
+						text = text + ongoingVotes[s].question+"\n\n"
+					for c in ongoingVotes[s].data.get("choices",[]):
+						text = text + applyTone(c["emoji"], ongoingVotes[s].tone) +" : "+str(voteCounter.get(c["emoji"], 0))+"\n\n"
+					
+					text = text + "Participation : "+str(len(ongoingVotes[s].votes))
+					if len(ongoingVotes[s].votes) > 1:
+						text = text + " personnes."
+					else:
+						text = text + " personne."
+					
+					await client.clear_reactions(msg)
+					await client.edit_message(msg, text)
+			except discord.errors.NotFound:
+				pass
+		
+		for k in toDelete:
+			del(ongoingVotes[k])
+		
+@client.event
+async def on_message(message):
+	try:
+		if not message.server:
+			return
+		
+		topicKey = (message.server.id, message.channel.id)
+		if topicKey in topics:
+			topics[topicKey].counter = topics[topicKey].counter + 1
+		
+		if message.author.bot:
+			return
+		if message.content.find(client.user.mention+" ") != 0:
+			return
+		
+		msgContent = message.content[len(client.user.mention+" "):].strip()
+		msgKeywords = msgContent.split(" ")
+		if len(msgKeywords) == 0:
+			return
+		
+		cmd = msgKeywords[0].strip()
+		
+		if cmd == "test":
+			return
+		if cmd == "help":
+			text = "**Commandes:**\n\n"
+			text = text + "``@"+client.user.name+" topic <texte>`` : change le sujet de la discussion.\n"
+			text = text + "``@"+client.user.name+" topic`` : supprime le sujet de la discussion.\n"
+			text = text + "``@"+client.user.name+" ban @LeNom#1234`` : ban une personne.\n"
+			text = text + "``@"+client.user.name+" kick @LeNom#1234`` : kick une personne.\n"
+			text = text + "``@"+client.user.name+" vote [options] <texte>`` : lancer un scrutin. Remplacez ``<texte>`` par la question à vote.  Les options possibles sont :\n"
+			text = text + " - ``short`` : affiche la question du vote et les réactions, mais cache les instructions.\n"
+			text = text + " - ``desc`` : affiche uniquement les instructions de vote, sans la question ni les réactions.\n"
+			text = text + " - ``h1``, ``h2``, ... : défini la durée du vote à 1 heure, 2 heures, ...\n"
+			text = text + " - ``live`` : les résultats sont visibles en directe.\n"
+			text = text + " - ``judge`` : le vote sera au jugement majoritaire.\n"
+			text = text + " - ``prop12`` : le vote departagera deux propositions.\n"
+			text = text + " - ``prop123`` : le vote departagera trois propositions.\n"
+			#text = text + "Vous pouvez aussi définir les choix du vote en ajoutant des lignes dans le format <emoji> <description> à la commande."
+			await client.send_message(message.channel, text)
+			return
+		
+		elif cmd == "kick":
+			
+			dateNow = datetime.datetime.now()
+			dateLastBan = dateNow - datetime.timedelta(days=2)
+			dateValideBan = dateNow - datetime.timedelta(days=1)
+			if lastBan.get(message.author.id, None):
+				dateLastBan = lastBan[message.author.id]
+			
+			if dateLastBan > dateValideBan:
+				await client.send_message(message.channel, "Vous avez déjà banni ou kické une personne ces dernières 24h.")
+				return
+			
+			if len(msgKeywords) > 1:
+				m = re.search('<@!?([0-9]*)>', msgKeywords[1])
+				if m:
+					member = message.server.get_member(m.group(1))
+					if member:
+						levelAuthor = getMemberLevel(message.author)
+						levelMember = getMemberLevel(member)
+						if levelAuthor < 2:
+							await client.send_message(message.channel, "Vous devez être admis-e pour utiliser cette commande.")
+						elif levelMember < levelAuthor or (levelMember == 3 and levelAuthor == 3):
+							try:
+								await client.kick(member)
+								lastBan[message.author.id] = dateNow
+								await client.send_message(message.channel, message.author.mention+" a kické "+member.display_name+"#"+member.discriminator+" du serveur.")
+							except:
+								await client.send_message(message.channel, "Impossible de kicker "+member.display_name+".")
+								print(traceback.format_exc())
+								pass
+						else:
+							await client.send_message(message.channel, "Vous n'avez pas les droits suffisants pour kicker cette personne.")
+					else:
+						await client.send_message(message.channel, "Impossible de trouver la personne mentionnée dans ce serveur.")
+				else:
+					print(msgKeywords[1])
+					await client.send_message(message.channel, "Vous devez mentionner une personne à kicker.")
+			else:
+				print(msgKeywords[1])
+				await client.send_message(message.channel, "Vous devez mentionner une personne à kicker.")
+			
+			return
+		
+		elif cmd == "ban":
+			dateNow = datetime.datetime.now()
+			dateLastBan = dateNow - datetime.timedelta(days=2)
+			dateValideBan = dateNow - datetime.timedelta(days=1)
+			if lastBan.get(message.author.id, None):
+				dateLastBan = lastBan[message.author.id]
+			
+			if dateLastBan > dateValideBan:
+				await client.send_message(message.channel, "Vous avez déjà banni ou kické une personne ces dernières 24h.")
+				return
+			
+			if len(msgKeywords) > 1:
+				m = re.search('<@!?([0-9]*)>', msgKeywords[1])
+				if m:
+					member = message.server.get_member(m.group(1))
+					if member:
+						levelAuthor = getMemberLevel(message.author)
+						levelMember = getMemberLevel(member)
+						if levelAuthor < 2:
+							await client.send_message(message.channel, "Vous devez être admis-e pour utiliser cette commande.")
+						elif levelMember < levelAuthor or (levelMember == 3 and levelAuthor == 3):
+							try:
+								await client.ban(member, 0)
+								await client.send_message(message.channel, message.author.mention+" a banni "+member.display_name+"#"+member.discriminator+" du serveur.")
+							except:
+								await client.send_message(message.channel, "Impossible de bannir "+member.display_name+".")
+								pass
+						else:
+							await client.send_message(message.channel, "Vous n'avez pas les droits suffisants pour bannir cette personne.")
+					else:
+						await client.send_message(message.channel, "Impossible de trouver la personne mentionnée dans ce serveur.")
+				else:
+					print(msgKeywords[1])
+					await client.send_message(message.channel, "Vous devez mentionner une personne à bannir.")
+			else:
+				print(msgKeywords[1])
+				await client.send_message(message.channel, "Vous devez mentionner une personne à bannir.")
+			
+			return
+		
+		elif cmd == "topic":
+			topicMsg = " ".join(msgKeywords[1:])
+			
+			
+			if len(topicMsg) == 0:
+				if topicKey in topics:
+					del(topics[topicKey])
+					await client.send_message(message.channel, ":loudspeaker: Sujet de la discussion supprimé.")
+			else:
+				topics[topicKey] = Topic(topicMsg)
+				await client.send_message(message.channel, ":loudspeaker: "+topicMsg)
+			
+			await client.delete_message(message)
+			
+			return
+		
+		elif cmd == "vote":
+			skinTone = random.choice(["", "🏻", "🏼", "🏽", "🏾", "🏿"])
+			
+			chan = message.channel
+			
+			if not chan:
+				return
+			
+			nextParam = 1
+			optLive = False
+			optDesc = False
+			optShort = False
+			duration = 24
+			defaultVoteType = "default"
+			while nextParam < len(msgKeywords):
+				if msgKeywords[nextParam] == "live":
+					optLive = True
+					nextParam = nextParam+1
+				elif msgKeywords[nextParam] == "desc":
+					optDesc = True
+					nextParam = nextParam+1
+				elif msgKeywords[nextParam] == "short":
+					optShort = True
+					nextParam = nextParam+1
+				elif msgKeywords[nextParam] in scrutinType:
+					defaultVoteType = msgKeywords[nextParam]
+					nextParam = nextParam+1
+				else:
+					m = re.search('^[hH]([0-9]+)', msgKeywords[nextParam])
+					if m:
+						duration = int(m.group(1))
+						nextParam = nextParam+1
+					else:
+						break
+			
+			question = " ".join(msgKeywords[nextParam:])
+			
+			scrutinData = scrutinType[defaultVoteType]
+			scrutinData["duration"] = duration*60
+			
+			if optDesc:
+				txt = ""
+				
+				dateEnd = datetime.datetime.now() + datetime.timedelta(minutes=scrutinData.get("duration", 0))
+				txt = txt + "**Scrutin ouvert** jusqu'au "+dateEnd.strftime("%d/%m/%y à %H:%M")+"\n"
+				txt = txt + scrutinVoteInfo+"\n\n"
+				
+				if question:
+					txt = txt + question+"\n"
+				
+				txt = txt + "\n"
+				for c in scrutinData.get("choices", []):
+					txt = txt + applyTone(c["emoji"], skinTone)+" : "+c["text"]+"\n\n"
+				
+				await client.send_message(chan, txt)
+				
+			else:
+				if optShort:
+					scrutinData["instructions"] = False
+				if optLive:
+					scrutinData["live"] = True
+				scrutin = Scrutin(question, scrutinData, skinTone, datetime.datetime.now())
+				
+				voteMsg = await client.send_message(chan, scrutin.getMessage())
+				voteKey = (voteMsg.server.id, voteMsg.channel.id, voteMsg.id)
+				
+				ongoingVotes[voteKey] = scrutin
+				for c in scrutinType[defaultVoteType].get("choices", []):
+					await client.add_reaction(voteMsg, applyTone(c["emoji"], skinTone))
+			
+			await client.delete_message(message)
+	except:
+		await client.send_message(message.channel, "Oups...")
+		print(traceback.format_exc())
+
+@client.event
+async def on_reaction_add(reaction, user):
+	try:
+		if not reaction.message.server:
+			return
+		if user.bot:
+			return
+		
+		voteKey = (reaction.message.server.id, reaction.message.channel.id, reaction.message.id)
+		
+		if voteKey not in ongoingVotes:
+			return
+		if ongoingVotes[voteKey].checkTime(datetime.datetime.now()):
+			return
+		
+		emoji = None
+		for c in ongoingVotes[voteKey].data.get("choices", []):
+			if checkEmoji(reaction, c["emoji"]):
+				emoji = c["emoji"]
+				break
+		
+		if emoji:
+			lastVote = ongoingVotes[voteKey].getVote(user.id)
+			ongoingVotes[voteKey].setVote(user.id, emoji)
+			await client.edit_message(reaction.message, ongoingVotes[voteKey].getMessage())
+			if lastVote == emoji:
+				await client.send_message(user, "Vous avez déjà voté "+emoji+" à la question suivante : "+ongoingVotes[voteKey].question)
+			elif lastVote:
+				await client.send_message(user, "Votre vote a été changé de "+lastVote+" vers "+emoji+" pour la question suivante : "+ongoingVotes[voteKey].question)
+			else:
+				await client.send_message(user, "Votre vote a été enregistré. Vous avez voté "+emoji+" à la question suivante : "+ongoingVotes[voteKey].question)
+		
+		await client.remove_reaction(reaction.message, reaction.emoji, user)
+		
+	except:
+		await client.send_message(reaction.message.channel, "Oups...")
+		print(traceback.format_exc())
+
+@client.event
+async def on_reaction_remove(reaction, user):
+	try:
+		if not reaction.message.server:
+			return
+		if user.id != client.user.id:
+			return
+		
+		voteKey = (reaction.message.server.id, reaction.message.channel.id, reaction.message.id)
+		
+		if voteKey not in ongoingVotes:
+			return
+		if ongoingVotes[voteKey].checkTime(datetime.datetime.now()):
+			return
+		
+		await client.add_reaction(reaction.message, reaction.emoji)
+		
+	except:
+		await client.send_message(reaction.message.channel, "Oups...")
+		print(traceback.format_exc())
+
+client.run(discord_token)
