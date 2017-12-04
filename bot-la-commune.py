@@ -73,6 +73,7 @@ scrutinType = {
 }
 emojiWithTone = ["👎", "🤷", "👍"]
 ongoingVotes = {}
+scrutinsToAdd = {}
 topics = {}
 lastBan = {}
 
@@ -177,12 +178,12 @@ try:
 			key = (topic.get("serverId", 0), topic.get("channelId", 0))
 			topics[key] = Topic(topic.get("message"))
 			topics[key].counter = topic.get("counter", 0)
-			topics[key].dateLast = dateutil.parser.parse(topic.get("dateLast", datetime.datetime.isoformat()))
+			topics[key].dateLast = dateutil.parser.parse(topic.get("dateLast", datetime.datetime.isoformat(datetime.datetime.now())))
 		
 		for scrutin in data.get("scrutins", []):
 			print("Scrutin found in backup")
 			key = (scrutin.get("serverId", 0), scrutin.get("channelId", 0), scrutin.get("messageId", 0))
-			dateStart = dateutil.parser.parse(scrutin.get("dateStart", datetime.datetime.isoformat()))
+			dateStart = dateutil.parser.parse(scrutin.get("dateStart", datetime.datetime.isoformat(datetime.datetime.now())))
 			ongoingVotes[key] = Scrutin(scrutin.get("question"), scrutin.get("data"), scrutin.get("tone"), dateStart)
 			ongoingVotes[key].votes = scrutin.get("votes", {})
 except:
@@ -193,7 +194,7 @@ except:
 """
 0 : Nouveaux-lles
 1 : Invité-e-s
-2 : Admis-e-s
+2 : Admis-es
 3 : Non-mixte
 4 : Modération
 5 : Technicien-ne-s
@@ -217,7 +218,7 @@ def getMemberLevel(member):
 	for r in member.roles:
 		if r.name == "Invité-e-s":
 			level = max(level, 1)
-		if r.name == "Admis-e-s":
+		if r.name == "Admis-es":
 			if nm:
 				level = max(level, 3)
 			else:
@@ -237,7 +238,7 @@ async def on_ready():
 	prevTime = time.time()
 	while True:
 		currTime = time.time()
-		sleepDuration = 20 - (currTime - prevTime)
+		sleepDuration = 5 - (currTime - prevTime)
 		prevTime = currTime
 		if sleepDuration > 0:
 			await asyncio.sleep(sleepDuration)
@@ -283,6 +284,9 @@ async def on_ready():
 		
 		toDelete = set()
 		
+		for s,scrutin in scrutinsToAdd.items():
+			ongoingVotes[s] = scrutin
+		
 		for s,scrutin in ongoingVotes.items():
 			try:
 				serv = client.get_server(s[0])
@@ -291,10 +295,52 @@ async def on_ready():
 				chan = serv.get_channel(s[1])
 				if not chan:
 					continue
-			
+				
 				msg = await client.get_message(chan, s[2])
 				
-				if ongoingVotes[s].checkTime(datetime.datetime.now() + datetime.timedelta(minutes=1)):
+				#check first if there is reaction to take care
+				if not ongoingVotes[s].checkTime(datetime.datetime.now() + datetime.timedelta(minutes=1)):
+					modification = False
+					emojiVisible = []
+					for r in msg.reactions:
+						try:
+							emoji = None
+							for c in scrutin.data.get("choices", []):
+								if checkEmoji(r, c["emoji"]):
+									emoji = c["emoji"]
+									break
+							
+							ra = await client.get_reaction_users(r)
+							for a in ra:
+								if not emoji:
+									await client.remove_reaction(msg, r.emoji, a)
+								elif a.id == client.user.id:
+									emojiVisible.append(emoji)
+								else:
+									lastVote = scrutin.getVote(a.id)
+									if lastVote == emoji:
+										await client.send_message(a, "Vous avez déjà voté "+emoji+" à la question suivante : "+scrutin.question)
+									elif lastVote:
+										scrutin.setVote(a.id, emoji)
+										modification = True
+										await client.send_message(a, "Votre vote a été changé de "+lastVote+" vers "+emoji+" pour la question suivante : "+scrutin.question)
+									else:
+										scrutin.setVote(a.id, emoji)
+										modification = True
+										await client.send_message(a, "Votre vote a été enregistré. Vous avez voté "+emoji+" à la question suivante : "+scrutin.question)
+									
+									await client.remove_reaction(msg, r.emoji, a)
+							
+						except:
+							pass
+					
+					for c in scrutin.data.get("choices", []):
+						if c["emoji"] not in emojiVisible:
+							await client.add_reaction(msg, c["emoji"])
+					
+					if modification:
+						await client.edit_message(msg, scrutin.getMessage())
+				else:
 					toDelete.add(s)
 					
 					voteCounter = {}
@@ -320,7 +366,7 @@ async def on_ready():
 					await client.edit_message(msg, text)
 			except discord.errors.NotFound:
 				pass
-		
+	
 		for k in toDelete:
 			del(ongoingVotes[k])
 		
@@ -526,77 +572,17 @@ async def on_message(message):
 					scrutinData["instructions"] = False
 				if optLive:
 					scrutinData["live"] = True
-				scrutin = Scrutin(question, scrutinData, skinTone, datetime.datetime.now())
 				
+				scrutin = Scrutin(question, scrutinData, skinTone, datetime.datetime.now())
+			
 				voteMsg = await client.send_message(chan, scrutin.getMessage())
 				voteKey = (voteMsg.server.id, voteMsg.channel.id, voteMsg.id)
 				
-				ongoingVotes[voteKey] = scrutin
-				for c in scrutinType[defaultVoteType].get("choices", []):
-					await client.add_reaction(voteMsg, applyTone(c["emoji"], skinTone))
+				scrutinsToAdd[voteKey] = scrutin
 			
 			await client.delete_message(message)
 	except:
 		await client.send_message(message.channel, "Oups...")
-		print(traceback.format_exc())
-
-@client.event
-async def on_reaction_add(reaction, user):
-	try:
-		if not reaction.message.server:
-			return
-		if user.bot:
-			return
-		
-		voteKey = (reaction.message.server.id, reaction.message.channel.id, reaction.message.id)
-		
-		if voteKey not in ongoingVotes:
-			return
-		if ongoingVotes[voteKey].checkTime(datetime.datetime.now()):
-			return
-		
-		emoji = None
-		for c in ongoingVotes[voteKey].data.get("choices", []):
-			if checkEmoji(reaction, c["emoji"]):
-				emoji = c["emoji"]
-				break
-		
-		if emoji:
-			lastVote = ongoingVotes[voteKey].getVote(user.id)
-			ongoingVotes[voteKey].setVote(user.id, emoji)
-			await client.edit_message(reaction.message, ongoingVotes[voteKey].getMessage())
-			if lastVote == emoji:
-				await client.send_message(user, "Vous avez déjà voté "+emoji+" à la question suivante : "+ongoingVotes[voteKey].question)
-			elif lastVote:
-				await client.send_message(user, "Votre vote a été changé de "+lastVote+" vers "+emoji+" pour la question suivante : "+ongoingVotes[voteKey].question)
-			else:
-				await client.send_message(user, "Votre vote a été enregistré. Vous avez voté "+emoji+" à la question suivante : "+ongoingVotes[voteKey].question)
-		
-		await client.remove_reaction(reaction.message, reaction.emoji, user)
-		
-	except:
-		await client.send_message(reaction.message.channel, "Oups...")
-		print(traceback.format_exc())
-
-@client.event
-async def on_reaction_remove(reaction, user):
-	try:
-		if not reaction.message.server:
-			return
-		if user.id != client.user.id:
-			return
-		
-		voteKey = (reaction.message.server.id, reaction.message.channel.id, reaction.message.id)
-		
-		if voteKey not in ongoingVotes:
-			return
-		if ongoingVotes[voteKey].checkTime(datetime.datetime.now()):
-			return
-		
-		await client.add_reaction(reaction.message, reaction.emoji)
-		
-	except:
-		await client.send_message(reaction.message.channel, "Oups...")
 		print(traceback.format_exc())
 
 client.run(discord_token)
