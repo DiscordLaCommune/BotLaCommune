@@ -15,6 +15,7 @@ import time
 import asyncio
 import random
 import dateutil.parser
+import operator
 
 # Init Discord client
 if len(sys.argv) < 1:
@@ -75,6 +76,8 @@ emojiWithTone = ["👎", "🤷", "👍"]
 ongoingVotes = {}
 scrutinsToAdd = {}
 topics = {}
+sharedMessages = {}
+sharedMessagesToDelete = []
 lastBan = {}
 
 scrutinVoteInfo = "Vous pouvez voter en cliquant sur une « réaction ». Vous recevrez alors une confirmation de vote via message privé. Vous pouvez changer votre vote à tout moment."
@@ -170,6 +173,11 @@ class Topic:
 		
 		return True
 
+class SharedMessage:
+	def __init__(self, channelId, messageId):
+		self.channelId = channelId
+		self.messageId = messageId
+
 try:
 	with open('backup.json', 'r') as infile:
 		data = json.load(infile)
@@ -180,8 +188,13 @@ try:
 			topics[key].counter = topic.get("counter", 0)
 			topics[key].dateLast = dateutil.parser.parse(topic.get("dateLast", datetime.datetime.isoformat(datetime.datetime.now())))
 		
+		for sm in data.get("sharedMessages", []):
+			key0 = sm.get("serverId", None)
+			key1 = sm.get("name", None)
+			if key0 and key1:
+				sharedMessages[(key0, key1)] = SharedMessage(sm.get("channelId"), sm.get("messageId"))
+		
 		for scrutin in data.get("scrutins", []):
-			print("Scrutin found in backup")
 			key = (scrutin.get("serverId", 0), scrutin.get("channelId", 0), scrutin.get("messageId", 0))
 			dateStart = dateutil.parser.parse(scrutin.get("dateStart", datetime.datetime.isoformat(datetime.datetime.now())))
 			ongoingVotes[key] = Scrutin(scrutin.get("question"), scrutin.get("data"), scrutin.get("tone"), dateStart)
@@ -243,6 +256,7 @@ async def on_ready():
 		if sleepDuration > 0:
 			await asyncio.sleep(sleepDuration)
 		
+		# Backup
 		with open('backup.json', 'w') as outfile:
 			data = {}
 			
@@ -254,6 +268,15 @@ async def on_ready():
 					"dateLast": topic.dateLast.isoformat(),
 					"serverId": t[0],
 					"channelId": t[1]
+				})
+			
+			data["sharedMessages"] = []
+			for sk,sm in sharedMessages.items():
+				data["sharedMessages"].append({
+					"name": sk[1],
+					"serverId": sk[0],
+					"channelId": sm.channelId,
+					"messageId": sm.messageId,
 				})
 			
 			data["scrutins"] = []
@@ -271,6 +294,7 @@ async def on_ready():
 		
 			json.dump(data, outfile)
 		
+		# Topics
 		for k,t in topics.items():
 			if t.check():
 				serv = client.get_server(k[0])
@@ -282,6 +306,13 @@ async def on_ready():
 				
 				await t.sendMessage(chan)
 		
+		# Shared messages
+		
+		for s in sharedMessagesToDelete:
+			del(sharedMessages[s])
+		
+		
+		# Scrutins
 		toDelete = set()
 		
 		for s,scrutin in scrutinsToAdd.items():
@@ -289,6 +320,9 @@ async def on_ready():
 		
 		for s,scrutin in ongoingVotes.items():
 			try:
+				if ongoingVotes[s].checkTime(datetime.datetime.now() + datetime.timedelta(minutes=1)):
+					toDelete.add(s)
+				
 				serv = client.get_server(s[0])
 				if not serv:
 					continue
@@ -341,8 +375,6 @@ async def on_ready():
 					if modification:
 						await client.edit_message(msg, scrutin.getMessage())
 				else:
-					toDelete.add(s)
-					
 					voteCounter = {}
 					for uid,v in ongoingVotes[s].votes.items():
 						if v in voteCounter:
@@ -364,7 +396,7 @@ async def on_ready():
 					
 					await client.clear_reactions(msg)
 					await client.edit_message(msg, text)
-			except discord.errors.NotFound:
+			except:
 				pass
 	
 		for k in toDelete:
@@ -392,14 +424,17 @@ async def on_message(message):
 		
 		cmd = msgKeywords[0].strip()
 		
-		if cmd == "test":
-			return
 		if cmd == "help":
 			text = "**Commandes:**\n\n"
 			text = text + "``@"+client.user.name+" topic <texte>`` : change le sujet de la discussion.\n"
 			text = text + "``@"+client.user.name+" topic`` : supprime le sujet de la discussion.\n"
 			text = text + "``@"+client.user.name+" ban @LeNom#1234`` : ban une personne.\n"
 			text = text + "``@"+client.user.name+" kick @LeNom#1234`` : kick une personne.\n"
+			text = text + "``@"+client.user.name+" add-msg <name> <texte>`` : poste un message éditable par tout le monde. Remplacez <name> par un identifiant pour ce message\n"
+			text = text + "``@"+client.user.name+" edit-msg <name> <texte>`` : affiche le code d'un message à partir de son ID ou de son identifiant.\n"
+			text = text + "``@"+client.user.name+" view-msg <name ou id>`` : affiche le code d'un message à partir de son ID ou de son identifiant.\n"
+			text = text + "``@"+client.user.name+" list-msg`` : affiche la liste des messages éditables.\n"
+			text = text + "``@"+client.user.name+" link-msg <name> <channelId> <msgId>`` : ajoute un message posté par ce bot comme message partagé.\n"
 			text = text + "``@"+client.user.name+" vote [options] <texte>`` : lancer un scrutin. Remplacez ``<texte>`` par la question à vote.  Les options possibles sont :\n"
 			text = text + " - ``short`` : affiche la question du vote et les réactions, mais cache les instructions.\n"
 			text = text + " - ``desc`` : affiche uniquement les instructions de vote, sans la question ni les réactions.\n"
@@ -408,10 +443,158 @@ async def on_message(message):
 			text = text + " - ``judge`` : le vote sera au jugement majoritaire.\n"
 			text = text + " - ``prop12`` : le vote departagera deux propositions.\n"
 			text = text + " - ``prop123`` : le vote departagera trois propositions.\n"
-			#text = text + "Vous pouvez aussi définir les choix du vote en ajoutant des lignes dans le format <emoji> <description> à la commande."
 			await client.send_message(message.channel, text)
 			return
 		
+		elif cmd == "list-msg":
+			msgList = []
+			for mId, m in sharedMessages.items():
+				if mId[0] == message.server.id:
+					msgList.append(mId[1])
+			
+			await client.send_message(message.channel, "Messages éditables : `"+"`, `".join(msgList)+"`")
+		
+		elif cmd == "add-msg":
+			msgName = msgKeywords[1].strip()
+			msgId = (message.server.id, msgName)
+			if msgId in sharedMessages:
+				await client.send_message(message.channel, "Le nom ``"+msgName+"`` est déjà utilisé.")
+				return
+			
+			msgText = " ".join(msgKeywords[2:])
+			
+			try:
+				msgSent = await client.send_message(message.channel, msgText)
+				sharedMessages[msgId] = SharedMessage(message.channel.id, msgSent.id)
+				await client.delete_message(message)
+				
+			except discord.NotFound:
+				await client.send_message(message.channel, "Message introuvable.")
+				pass
+			return
+		
+		elif cmd == "link-msg":
+			msgName = msgKeywords[1].strip()
+			msgKey = (message.server.id, msgName)
+			chanId = msgKeywords[2].strip()
+			msgId = msgKeywords[3].strip()
+			
+			try:
+				if msgId in sharedMessages:
+					await client.send_message(message.channel, "Le nom ``"+msgName+"`` est déjà utilisé.")
+					return
+				
+				msgChan = message.server.get_channel(chanId)
+				if not msgChan:
+					await client.send_message(message.channel, "Message introuvable.")
+					return
+				
+				msgFound = await client.get_message(msgChan, msgId)
+				
+				sharedMessages[msgKey] = SharedMessage(msgFound.channel.id, msgFound.id)
+				await client.delete_message(message)
+				
+				await client.send_message(message.channel, "Message partagé trouvé : ```\n"+msgFound.content.replace("```", "'''")+"\n```")
+			except discord.NotFound:
+				await client.send_message(message.channel, "Message introuvable.")
+				pass
+			return
+		
+		elif cmd == "edit-msg":
+			msgId = (message.server.id, msgKeywords[1].strip())
+			msgText = " ".join(msgKeywords[2:])
+			
+			if msgId not in sharedMessages:
+				await client.send_message(message.channel, "Message introuvable.")
+				return
+					
+			msgChanId = sharedMessages[msgId].channelId
+			msgChan = message.server.get_channel(msgChanId)
+			if not msgChan:
+				await client.send_message(message.channel, "Message introuvable.")
+				return
+			
+			msgId = sharedMessages[msgId].messageId
+		
+			try:
+				if not(msgChan.permissions_for(message.author).read_messages and msgChan.permissions_for(message.author).send_messages):
+					await client.send_message(message.channel, "Vous n'avez pas les droits pour modifier ce message.")
+					return
+				
+				msgFound = await client.get_message(msgChan, msgId)
+				await client.edit_message(msgFound, msgText)
+				await client.delete_message(message)
+				
+			except discord.NotFound:
+				await client.send_message(message.channel, "Message introuvable.")
+				pass
+			return
+		
+		elif cmd == "delete-msg":
+			msgId = (message.server.id, msgKeywords[1].strip())
+			msgText = " ".join(msgKeywords[2:])
+			
+			if msgId not in sharedMessages:
+				await client.send_message(message.channel, "Message introuvable.")
+				return
+					
+			msgChanId = sharedMessages[msgId].channelId
+			msgChan = message.server.get_channel(msgChanId)
+			if not msgChan:
+				await client.send_message(message.channel, "Message introuvable.")
+				return
+			
+			msgId = sharedMessages[msgId].messageId
+		
+			try:
+				if not(msgChan.permissions_for(message.author).read_messages and msgChan.permissions_for(message.author).send_messages):
+					await client.send_message(message.channel, "Vous n'avez pas les droits pour supprimer ce message.")
+					return
+				
+				msgFound = await client.get_message(msgChan, msgId)
+				msgText = msgFound.content
+				msgText = msgText.replace("```", "'''")
+				await client.delete_message(msgFound)
+				await client.send_message(message.channel, "Message supprimé :```\n"+msgText+"\n```")
+				sharedMessagesToDelete.append(msgId);
+				
+			except discord.NotFound:
+				await client.send_message(message.channel, "Message introuvable.")
+				pass
+			return
+		
+		elif cmd == "view-msg":
+			msgId = (message.server.id, msgKeywords[1].strip())
+			msgChan = message.channel
+			
+			try:
+				if msgId in sharedMessages:
+					msgChanId = sharedMessages[msgId].channelId
+					msgChan = message.server.get_channel(msgChanId)
+					if not msgChan:
+						await client.send_message(message.channel, "Message introuvable.")
+						return
+					
+					msgId = sharedMessages[msgId].messageId
+				else:
+					msgId = msgKeywords[1].strip()
+					
+					if not(msgChan.permissions_for(message.author).read_messages):
+						await client.send_message(message.channel, "Vous n'avez pas les droits pour afficher ce message.")
+						return
+				
+				msgFound = await client.get_message(msgChan, msgId)
+				msgText = msgFound.content
+				if msgText.find("```") >= 0:
+					await client.send_message(message.channel, "Attention, le message contient des balises codes (```). Pour des raisons d'affichage, elles été remplacées par (''').")
+					msgText.replace("```", "'''")
+				
+				await client.send_message(message.channel, "```\n"+msgText+"\n```")
+			except discord.NotFound:
+				await client.send_message(message.channel, "Message introuvable.")
+				pass
+			return
+			
 		elif cmd == "kick":
 			
 			dateNow = datetime.datetime.now()
@@ -433,6 +616,8 @@ async def on_message(message):
 						levelMember = getMemberLevel(member)
 						if levelAuthor < 2:
 							await client.send_message(message.channel, "Vous devez être admis-e pour utiliser cette commande.")
+						elif member.id == message.author.id:
+							await client.send_message(message.channel, "Vous ne pouvez pas vous kicker vous-même.")
 						elif levelMember < levelAuthor or (levelMember == 3 and levelAuthor == 3):
 							try:
 								await client.kick(member)
@@ -475,6 +660,8 @@ async def on_message(message):
 						levelMember = getMemberLevel(member)
 						if levelAuthor < 2:
 							await client.send_message(message.channel, "Vous devez être admis-e pour utiliser cette commande.")
+						elif member.id == message.author.id:
+							await client.send_message(message.channel, "Vous ne pouvez pas vous bannir vous-même.")
 						elif levelMember < levelAuthor or (levelMember == 3 and levelAuthor == 3):
 							try:
 								await client.ban(member, 0)
@@ -509,6 +696,57 @@ async def on_message(message):
 			
 			await client.delete_message(message)
 			
+			return
+		
+		elif cmd == "check-activity":
+			#~ if getMemberLevel(message.author) < 4:
+			if message.author.id != "287858556684730378":
+				return
+			
+			statusMsg = await client.send_message(message.channel, "Analyse en cours...")
+			checkDate = message.timestamp - datetime.timedelta(days=30)
+			
+			userStats = {}
+			
+			excludedChannels = [
+				"shitpost",
+				"accueil",
+				"chasse_aux_fafs"
+			]
+			
+			for c in message.server.channels:
+				if c.type != discord.ChannelType.text:
+					continue
+				if c.name in excludedChannels:
+					continue
+				
+				msgCounter = 0
+				stillNotDone = True
+				logLimit = checkDate
+				while stillNotDone:
+					msgSubCounter = 0
+					async for m in client.logs_from(c, limit=100, after=logLimit):
+						if msgSubCounter == 0:
+							logLimit = m
+						msgSubCounter = msgSubCounter+1
+						
+						prevNum = userStats.get(m.author, 0)
+						userStats[m.author] = prevNum+1
+						
+					msgCounter = msgCounter+msgSubCounter
+					if msgSubCounter <= 1:
+						stillNotDone = False
+				
+				await client.edit_message(statusMsg, "Analyse du salon "+c.mention+" : "+str(msgCounter)+ " messages")
+			
+			text = ""
+			for u,numMsg in sorted(userStats.items(), key=operator.itemgetter(1)):
+				subText = u.name+" : "+str(numMsg)+" messages\n"
+				if len(text) + len(subText) > 1500:
+					await client.send_message(message.channel, text)
+					text = ""
+				text += subText
+			await client.send_message(message.channel, text)
 			return
 		
 		elif cmd == "vote":
