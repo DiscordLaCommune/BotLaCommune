@@ -225,7 +225,7 @@ def getMemberLevel(member):
 			nm = True
 		if c.name == "nm_racise-e-s" and c.permissions_for(member).read_messages:
 			nm = True
-		if c.name == "nm_neuroatypique" and c.permissions_for(member).read_messages:
+		if c.name == "nm_neurodivergent" and c.permissions_for(member).read_messages:
 			nm = True
 	
 	for r in member.roles:
@@ -353,19 +353,29 @@ async def on_ready():
 								else:
 									lastVote = scrutin.getVote(a.id)
 									if lastVote == emoji:
-										await client.send_message(a, "Vous avez déjà voté "+emoji+" à la question suivante : "+scrutin.question)
+										try:
+											await client.send_message(a, "Vous avez déjà voté "+emoji+" à la question suivante : "+scrutin.question)
+										except:
+											pass
 									elif lastVote:
 										scrutin.setVote(a.id, emoji)
 										modification = True
-										await client.send_message(a, "Votre vote a été changé de "+lastVote+" vers "+emoji+" pour la question suivante : "+scrutin.question)
+										try:
+											await client.send_message(a, "Votre vote a été changé de "+lastVote+" vers "+emoji+" pour la question suivante : "+scrutin.question)
+										except:
+											pass
 									else:
 										scrutin.setVote(a.id, emoji)
 										modification = True
-										await client.send_message(a, "Votre vote a été enregistré. Vous avez voté "+emoji+" à la question suivante : "+scrutin.question)
+										try:
+											await client.send_message(a, "Votre vote a été enregistré. Vous avez voté "+emoji+" à la question suivante : "+scrutin.question)
+										except:
+											pass
 									
 									await client.remove_reaction(msg, r.emoji, a)
 							
 						except:
+							print(traceback.format_exc())
 							pass
 					
 					for c in scrutin.data.get("choices", []):
@@ -665,6 +675,7 @@ async def on_message(message):
 						elif levelMember < levelAuthor or (levelMember == 3 and levelAuthor == 3):
 							try:
 								await client.ban(member, 0)
+								lastBan[message.author.id] = dateNow
 								await client.send_message(message.channel, message.author.mention+" a banni "+member.display_name+"#"+member.discriminator+" du serveur.")
 							except:
 								await client.send_message(message.channel, "Impossible de bannir "+member.display_name+".")
@@ -679,6 +690,32 @@ async def on_message(message):
 			else:
 				print(msgKeywords[1])
 				await client.send_message(message.channel, "Vous devez mentionner une personne à bannir.")
+			
+			return
+		
+		elif cmd == "fix-veille":
+			if message.author.id != "287858556684730378":
+				return
+			roleAdmisVeille = None
+			
+			for r in message.server.roles:
+				if r.name == "Admis-es en veille":
+					roleAdmisVeille = r
+					break
+			
+			mToFix = message.content.split("\n")[1:]
+			
+			for mName in mToFix:
+				mFound = False
+				for m in message.server.members:
+					if mName == m.name+"#"+m.discriminator:
+						await client.add_roles(m, roleAdmisVeille)
+						mFound = True
+						break
+				if mFound:
+					await client.send_message(message.channel, "« "+mName+" » fixé·e.")
+				else:
+					await client.send_message(message.channel, "Impossible de trouver la personne « "+mName+" » mentionnée dans ce serveur.")
 			
 			return
 		
@@ -697,7 +734,7 @@ async def on_message(message):
 			await client.delete_message(message)
 			
 			return
-		
+			
 		elif cmd == "check-activity":
 			#~ if getMemberLevel(message.author) < 4:
 			if message.author.id != "287858556684730378":
@@ -710,7 +747,6 @@ async def on_message(message):
 			
 			excludedChannels = [
 				"shitpost",
-				"accueil",
 				"chasse_aux_fafs"
 			]
 			
@@ -737,16 +773,50 @@ async def on_message(message):
 					if msgSubCounter <= 1:
 						stillNotDone = False
 				
-				await client.edit_message(statusMsg, "Analyse du salon "+c.mention+" : "+str(msgCounter)+ " messages")
+				await client.edit_message(statusMsg, "Analyse du salon "+c.mention)
 			
-			text = ""
-			for u,numMsg in sorted(userStats.items(), key=operator.itemgetter(1)):
-				subText = u.name+" : "+str(numMsg)+" messages\n"
-				if len(text) + len(subText) > 1500:
-					await client.send_message(message.channel, text)
-					text = ""
-				text += subText
+			text = "**Les admis·es suivant·e·s sont maintenant en veille :*\n"
+			
+			roleAdmis = None
+			roleAdmisVeille = None
+			roleSdR = None
+			
+			for r in message.server.roles:
+				if r.name == "Admis-es en veille":
+					roleAdmisVeille = r
+				elif r.name == "Admis-es":
+					roleAdmis = r
+				elif r.name == "Salle de Réflexion":
+					roleSdR = r
+			
+			if not roleAdmisVeille or not roleAdmis or not roleSdR:
+				return 
+			
+			for m in message.server.members:
+				if m.bot:
+					continue
+				if checkDate < m.joined_at:
+					continue
+				
+				if roleAdmis not in m.roles:
+					continue
+				
+				isInactive = True
+				if m in userStats and userStats[m] > 5:
+					isInactive = False
+				
+				if isInactive:
+					await client.add_roles(m, roleAdmisVeille)
+					await client.remove_roles(m, roleAdmis, roleSdR)
+					
+					subText = m.name+"#"+str(m.discriminator)+"\n"
+					if len(text) + len(subText) > 1500:
+						await client.send_message(message.channel, text)
+						text = ""
+					text += subText
+			
 			await client.send_message(message.channel, text)
+			
 			return
 		
 		elif cmd == "vote":
