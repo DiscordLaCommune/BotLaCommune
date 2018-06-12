@@ -219,13 +219,15 @@ def getMemberLevel(member):
 	#Seach in NM
 	nm = False
 	for c in member.server.channels:
-		if c.name == "nm_feministe" and c.permissions_for(member).read_messages:
+		if c.name == "nm_féministe" and c.permissions_for(member).read_messages:
 			nm = True
 		if c.name == "nm_lgbti" and c.permissions_for(member).read_messages:
 			nm = True
-		if c.name == "nm_racise-e-s" and c.permissions_for(member).read_messages:
+		if c.name == "nm_trans" and c.permissions_for(member).read_messages:
 			nm = True
-		if c.name == "nm_neurodivergent" and c.permissions_for(member).read_messages:
+		if c.name == "nm_racisé-e-s" and c.permissions_for(member).read_messages:
+			nm = True
+		if c.name == "nm_neurodivergent-e-s" and c.permissions_for(member).read_messages:
 			nm = True
 	
 	for r in member.roles:
@@ -693,32 +695,6 @@ async def on_message(message):
 			
 			return
 		
-		elif cmd == "fix-veille":
-			if message.author.id != "287858556684730378":
-				return
-			roleAdmisVeille = None
-			
-			for r in message.server.roles:
-				if r.name == "Admis-es en veille":
-					roleAdmisVeille = r
-					break
-			
-			mToFix = message.content.split("\n")[1:]
-			
-			for mName in mToFix:
-				mFound = False
-				for m in message.server.members:
-					if mName == m.name+"#"+m.discriminator:
-						await client.add_roles(m, roleAdmisVeille)
-						mFound = True
-						break
-				if mFound:
-					await client.send_message(message.channel, "« "+mName+" » fixé·e.")
-				else:
-					await client.send_message(message.channel, "Impossible de trouver la personne « "+mName+" » mentionnée dans ce serveur.")
-			
-			return
-		
 		elif cmd == "topic":
 			topicMsg = " ".join(msgKeywords[1:])
 			
@@ -732,90 +708,6 @@ async def on_message(message):
 				await client.send_message(message.channel, ":loudspeaker: "+topicMsg)
 			
 			await client.delete_message(message)
-			
-			return
-			
-		elif cmd == "check-activity":
-			#~ if getMemberLevel(message.author) < 4:
-			if message.author.id != "287858556684730378":
-				return
-			
-			statusMsg = await client.send_message(message.channel, "Analyse en cours...")
-			checkDate = message.timestamp - datetime.timedelta(days=30)
-			
-			userStats = {}
-			
-			excludedChannels = [
-				"shitpost",
-				"chasse_aux_fafs"
-			]
-			
-			for c in message.server.channels:
-				if c.type != discord.ChannelType.text:
-					continue
-				if c.name in excludedChannels:
-					continue
-				
-				msgCounter = 0
-				stillNotDone = True
-				logLimit = checkDate
-				while stillNotDone:
-					msgSubCounter = 0
-					async for m in client.logs_from(c, limit=100, after=logLimit):
-						if msgSubCounter == 0:
-							logLimit = m
-						msgSubCounter = msgSubCounter+1
-						
-						prevNum = userStats.get(m.author, 0)
-						userStats[m.author] = prevNum+1
-						
-					msgCounter = msgCounter+msgSubCounter
-					if msgSubCounter <= 1:
-						stillNotDone = False
-				
-				await client.edit_message(statusMsg, "Analyse du salon "+c.mention)
-			
-			text = "**Les admis·es suivant·e·s sont maintenant en veille :*\n"
-			
-			roleAdmis = None
-			roleAdmisVeille = None
-			roleSdR = None
-			
-			for r in message.server.roles:
-				if r.name == "Admis-es en veille":
-					roleAdmisVeille = r
-				elif r.name == "Admis-es":
-					roleAdmis = r
-				elif r.name == "Salle de Réflexion":
-					roleSdR = r
-			
-			if not roleAdmisVeille or not roleAdmis or not roleSdR:
-				return 
-			
-			for m in message.server.members:
-				if m.bot:
-					continue
-				if checkDate < m.joined_at:
-					continue
-				
-				if roleAdmis not in m.roles:
-					continue
-				
-				isInactive = True
-				if m in userStats and userStats[m] > 5:
-					isInactive = False
-				
-				if isInactive:
-					await client.add_roles(m, roleAdmisVeille)
-					await client.remove_roles(m, roleAdmis, roleSdR)
-					
-					subText = m.name+"#"+str(m.discriminator)+"\n"
-					if len(text) + len(subText) > 1500:
-						await client.send_message(message.channel, text)
-						text = ""
-					text += subText
-			
-			await client.send_message(message.channel, text)
 			
 			return
 		
